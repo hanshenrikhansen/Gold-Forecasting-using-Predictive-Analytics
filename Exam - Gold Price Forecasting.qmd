@@ -1,0 +1,757 @@
+---
+title: "Forecasting the development in the price of gold"
+author: "Hans-Henrik Hansen (153689)"
+format: pdf
+editor: visual
+---
+
+## Loading the data and relevant packages
+
+```{r}
+library(dplyr)
+library(strucchange)
+```
+
+```{r}
+#Loading packages
+
+library(tibble)
+library(VIM)
+library(tidyr)
+library(tseries)
+library(stringr)
+library(AER)
+library(car)
+library(lmtest)
+library(sandwich)
+library(Formula)
+library(zoo)
+library(strucchange)
+library(ggplot2)
+library(plm)
+library(MASS)
+library(ivreg)
+library(fpp3)
+library(tidyverse) 
+library(ggplot2)
+
+```
+
+```{r}
+
+library(readr)
+price_info <- read_csv("Price information.csv")
+View(Price_information)
+```
+
+# Data preprocessing and exploration
+
+```{r}
+
+glimpse(price_info)
+
+#we shall reduce the dataframe to only include potentially relevant columns
+price_info <- dplyr::select(price_info, date, `gold open`)
+
+
+```
+
+```{r}
+glimpse(price_info)
+```
+
+```{r}
+
+na_summary <- price_info %>%
+  summarise(across(everything(), ~mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = everything(), names_to = "Column", values_to = "NA_Percent")
+
+print(na_summary)
+
+```
+
+```{r}
+summary_stats <- price_info %>%
+  summarise(across(where(is.numeric), list(mean = ~mean(., na.rm = TRUE),
+                                           sd = ~sd(., na.rm = TRUE))))
+
+
+summary_stats_long <- summary_stats %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Column", ".value"),
+               names_sep = "_")
+
+print(summary_stats_long)
+
+```
+
+We see that there are 185 NA values, and that they correspond to a total of 4.74% of the total dataset. Furthermore, we see that there is exactly the same amount of missing values in each column, and checking we see that the NAs are located in the same rows. We shall drop these
+
+```{r}
+imputed_data <- price_info %>% drop_na()
+
+
+```
+
+Lets see how imputing the missing values changed our mean and standard deviations:
+
+```{r}
+summary_stats <- imputed_data %>%
+  summarise(across(where(is.numeric), list(mean = ~mean(., na.rm = TRUE),
+                                           sd = ~sd(., na.rm = TRUE))))
+
+
+summary_stats_long <- summary_stats %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Column", ".value"),
+               names_sep = "_")
+
+print(summary_stats_long)
+```
+
+Lets plot our time series to get a better understanding of how it acts. But first we need to take into account that our data contains gaps since the stock market closes every weekend, and we therefore need to fix this by making the data continous:
+
+```{r}
+# we ensure that the date column is in date format
+imputed_data$date <- as.Date(imputed_data$date)
+
+# We then create a full and continous sequence of dates
+# Based on the starting and end date of our data
+full_dates <- data.frame(date = seq(min(imputed_data$date), max(imputed_data$date), by = "day"))
+
+
+```
+
+Now we join this sequence back into our gold price table, which will create NAs for all the dates representing weekends where the stock market has been closed. We will use a forward fill method where the last observation before the weekend day/NA value is used to fill in that given NA value
+
+```{r}
+gold_full <- full_dates %>%
+  left_join(imputed_data, by = "date")
+
+```
+
+```{r}
+
+
+
+gold_full <- gold_full %>%
+  fill('gold open', .direction = "down")
+
+```
+
+Lets view the data ro check for NA values
+
+```{r}
+na_summary <- gold_full %>%
+  summarise(across(everything(), ~mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = everything(), names_to = "Column", values_to = "NA_Percent")
+
+print(na_summary)
+```
+
+```{r}
+gold_full <- gold_full %>%
+  rename(gold_open = `gold open`)
+
+gold_ts <- gold_full %>%
+  as_tsibble(index = date)
+
+```
+
+```{r}
+autoplot(gold_ts, gold_open) +
+  labs(title = "Gold prices from 2010 to 2024", x = 'date', y = 'gold_opening')
+```
+
+We see that daily data contains a lot of day to day fluctuations, and seems rather noisy. We shall convert our data into weekly data, since this will provide fewer data points and thereby less noise since fewer data points forces our model to focus on general patterns (like seasonality or trend) instead of overreacting to small, daily fluctuations. Day to day developments in the stock and commodity market must also be seen as noise, since a lot of daily factors can contribute to the development, and we will therefore be in a much better position to provide useful forecasts with our model if we smooth out our data with weekly data instead.
+
+```{r}
+summary_table <- tibble(
+  `Number of observations` = nrow(gold_ts),
+  `Time span` = paste0(min(gold_ts$week), " to ", max(gold_ts$week)),
+  `Frequency` = "Weekly",
+  `Number of variables` = ncol(gold_ts),
+  `Missing values (gold_open)` = sum(is.na(gold_ts$gold_open)),
+  `Mean gold_open` = round(mean(gold_ts$gold_open, na.rm = TRUE), 2),
+  `Min gold_open` = round(min(gold_ts$gold_open, na.rm = TRUE), 2),
+  `Max gold_open` = round(max(gold_ts$gold_open, na.rm = TRUE), 2)
+)
+
+# Convert all values to character and pivot
+summary_table_t <- summary_table %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(cols = everything(), names_to = "Characteristic", values_to = "Value")
+
+```
+
+```{r}
+
+summary_table_t
+```
+
+```{r}
+install.packages('gt')
+```
+
+```{r}
+library(gt)
+
+summary_table_t %>%
+  gt() %>%
+  tab_header(title = "Summary of the data")
+```
+
+```{r}
+gold_weekly <- gold_ts %>%
+  index_by(week = yearweek(date)) %>%  # create a weekly index
+  summarise(gold_open = first(gold_open))
+```
+
+```{r}
+
+ggplot(gold_weekly, aes(x = week, y = gold_open)) +
+  geom_line() +
+  labs(title = "Weekly Gold Opening Prices", x = "Week", y = "Gold Open")
+
+```
+
+There is a rather steep increase in the gold price from 2009 (right after the financial crisis) up until around 2013 and the gold price then decreases significantly. This can be seen as a structural break in the sense that a significant macroeconomic event hit during this period and strongly affected the gold price in an unusual manner and when the latent effects of the financial crisis cools down in 2013 the price of gold rapidly drops. From 2014 to 2015, the price settles back to a level around the same as before 2010 and it then keeps at a steady level up until 2019, right before the corona crisis, where it then start increasing significantly again and after 2023 it increases almost exponentially, which implies a strong positive trend, although not linear. Therefore, it strongly implies that we should difference our data to consider the growth rates which should remove the trend from our data. Furthermore, our data seems to contain non constant variance since the years 2013 and 2020 seems to be periods the gold price is significantly more volatile than the remaining periods, especially in 2020 where the corona crisis hits.
+
+Let us run a decomposition to see if the data contains trend and/or seasonality:
+
+```{r}
+gold_open_ts_decomp <- ts(gold_weekly$gold_open, frequency = 52)
+
+decomp <- decompose(gold_open_ts_decomp, type = "additive")
+
+df_decomp <- tibble(
+  time = time(decomp$trend),
+  observed = decomp$x,
+  trend = decomp$trend,
+  seasonal = decomp$seasonal,
+  random = decomp$random
+)
+
+# Melt the data for ggplot
+df_long <- df_decomp %>%
+  pivot_longer(cols = -time, names_to = "component", values_to = "value")
+
+# Plot
+ggplot(df_long, aes(x = time, y = value)) +
+  geom_line() +
+  facet_wrap(~ component, scales = "free_y", ncol = 1) +
+  labs(title = "Additive Decomposition of Weekly Gold Prices", x = "Time", y = NULL) +
+  theme_minimal()
+```
+
+We see that there are an overall positive trend in the data with a rather significant magnitude even though it is fluctuating quite a lot and it is only in the last few observations that the positive trend is really becoming obvious. Furthermore, we see that there does not really seem to be any seasonality in the data since the seasonal component moves within the range of -4 to 2 which are insignifficantly small values. When looking at the remaining random component which shows the irregular patterns that cannot be explained by the trend in our data, we see that it seems to have larger variation around two periods, that is from 2009 to 2013 and 2020 to 2024 whereas it seems to have similar and small variation in between these two periods. Thus, the random component does not behave like white noise which we ideally want it to, and this implies that we should consider looking for structural breaks since these might help us explain what is happening in 2009 to 2013 and 2020 to 2024.
+
+Before looking closer into any structural breaks let us first check for stationarity in the data:
+
+```{r}
+adf.test(gold_weekly$gold_open)
+kpss.test(gold_weekly$gold_open)
+```
+
+As expected, the p value of the dickey fuller test is extremely high at 0.99 (\>0.05) which means that we cannot reject the null hypothesis stating that the data is non-stationary, and there is therefore strong evidence suggesting non stationarity. In the KPSS test we observe a p-value of 0.01 (\<0.05) and we can therefore safely safely reject the null hypothesis stating that the data is stationary.
+
+Let us try to difference the time series since we could also say that there is a non-linear trend in the data, even though, it clearly looks like it is structural breaks and not trends. We shall then run the test for stationarity again to see if a differencing term is adequate:
+
+```{r}
+ts_gold_diff <- gold_weekly %>%
+  mutate(diff_gold_open = difference(gold_open))
+```
+
+```{r}
+ts_gold_diff %>%
+  autoplot(diff_gold_open) +
+  labs(title = "Differenced Gold Opening Price", x = "Week", y = "Differenced Price")
+
+```
+
+Based on the differenced data we see that there are large spikes in the variance around 2013 and 2020 as well as an increase in the mean towards the end of 2024, which implies that the differencing is not sufficient at making the time series stationary, since it still contains both changing variance and changing mean.
+
+```{r}
+
+adf.test(na.omit(ts_gold_diff$diff_gold_open))
+kpss.test(na.omit(ts_gold_diff$diff_gold_open))
+```
+
+```{r}
+acf(na.omit(ts_gold_diff$diff_gold_open), main = "ACF of Differenced Gold Opening Price")
+pacf(na.omit(ts_gold_diff$diff_gold_open), main = "PACF of Differenced Gold Opening Price")
+
+
+```
+
+Instead of using a differencing term, we shall test to see if our argumentation towards a structural break around 2009 and around 2020 holds true. To do this we shall refrain from using the CHOW test since this model assumes NO correlation in the residuals of the data and below we can see that the data contains strong autocorrelation, and the CHOW test can therefore give misleading results.
+
+```{r}
+acf(gold_weekly$gold_open, main = "ACF of Weekly Gold Opening Prices")
+```
+
+Instead we shall use the CUSUM test since this works better for auto-correlated data, and we shall use it in combination with the breakpoints() function to pinpoint where the structural breaks are in case there are any. The CUSUM test is a test for overall stability in the data and will therefore help us identify if any structural breaks exists in the data and the breakpoints function helps us locate the exact location of such breaks.
+
+```{r}
+#We fit a linear model to our data
+model_gold <- lm(gold_open ~ week, data = gold_weekly)
+
+```
+
+```{r}
+#We run our CUSUM test to check for general instability
+sctest(model_gold, type = "CUSUM")
+```
+
+The null hyothesis of the CUSUM test is that there is general stability in the data. We see that our p-value is less than 2.2e-16 and is therefore extremely small. Because of this we can safely reject the null hypothesis that there is stability in the data which in terms means that there is strong evidence for instability/breaks in the data.
+
+Let us try to locate the exact location of the break(s):
+
+```{r}
+
+bp <- breakpoints(gold_open ~ 1, data = gold_weekly)
+summary(bp)
+plot(bp)
+
+```
+
+From this output we see that adding around 1 breakpoints to the data will minimize the BIC significantly since the curve is dropping rapidly by adding the first breakpoint whereafter the drop is less significant when adding a second breakpoint. Adding a 3rd breakpoint only minimally improves the model , whereafter it does not make sense to add any additional breaks.
+
+```{r}
+gold_weekly$week[c(175, 533)]
+
+```
+
+Thus, we see that our two breakpoints are at week 2020 week 15 which is also in accordance with what we initially observed in terms of stating that the corona crisis constitutes a shock. If we were to include two breakpoints it the 1st breakpoints would be located at 2013 which is were we also argumented towards a shock being present, however, since our model only suggest that we should include 1 breakpoint we shall not use a dummy variable for 2013.
+
+We shall incorporate exogenous variable in our model (one dummy variables that represent the one identified most important break in our data), and our model will therefore become an autoregressive integrated moving average with exogenous variables (ARIMAX).
+
+Here we add the dummy variables to represent the breaks:
+
+```{r}
+gold_weekly <- gold_weekly %>%
+  mutate(
+    break1 = if_else(row_number() > 175, 1, 0),
+    break2 = if_else(row_number() > 533, 1, 0),
+  )
+
+```
+
+```{r}
+
+ts_gold_diff <- ts_gold_diff %>%
+  mutate(
+    break1 = if_else(row_number() > 175, 1, 0),
+    break2 = if_else(row_number() > 533, 1, 0),
+  )
+```
+
+Now that we have created dummy variables we shall fit a model to investigate the residuals to determine whether or not these are sufficient for making the models residuals stationary or if we will need to add terms to the model to handle either varying mean or variance.
+
+```{r}
+#we run a base model with only our dummies
+
+lm_base <- lm(gold_open ~ break1 + break2, data = gold_weekly)
+resid_base <- residuals(lm_base)
+
+```
+
+```{r}
+lm_base2 <- lm(diff_gold_open ~ break1 + break2, data = ts_gold_diff)
+
+resid_base2 <- residuals(lm_base2)
+```
+
+```{r}
+
+acf(resid_base2, lag.max = 60, main = "ACF of residuals from differenced base with breaks")
+pacf(resid_base2, main = "PACF of residuals from differenced base with breaks")
+```
+
+Now that we have fitted a model taking into account only the dummy variables we shall plot the ACF and PACF as well as run a ADF and KPSS test to investigate whether our data is stationary after having taken into account the breaks and if we need to add any AR or MA terms to the model.
+
+```{r}
+#We plot our ACF and PACF for residuals to investigate
+#if the data is stationary
+
+# Plot ACF and PACF of residuals
+acf(resid_base, lag.max = 50, main = "ACF of residuals from base with breaks")
+pacf(resid_base, main = "PACF of residuals from base with breaks")
+
+
+```
+
+```{r}
+resid_df <- data.frame(
+  date = gold_weekly$week,
+  resid = resid_base
+)
+
+ggplot(resid_df, aes(x = date, y = resid)) +
+  geom_line() +
+  labs(title = "Residuals Over Time", x = "Date", y = "Residuals")
+```
+
+```{r}
+adf.test(resid_base)
+
+kpss.test(resid_base)
+```
+
+The ACF plot shows significant autocorrelation across many lags, which at first might suggest a complex dependence structure. However, this extended autocorrelation is likely the result of a strong autocorrelation at lag 1 being propagated forward. This interpretation is supported by the PACF plot, which shows a clear spike at lag 1 and only 1 significant spike beyond that at lag 3, which indicates that all the higher order autocorrelations can be explained by the autocorrelation in lag 1. This suggest that the underlying process may be primarily driven by a first-order autoregressive component (AR(1)). Furthermore, we do not see any structures in the PACF plot that suggest a seasonal term and, because of this, we do not need to add any seasonal term to the model.
+
+When looking at the ADF test we see that we get p value of 0.99 and we can therefore reject the null hypothesis that the data is non-stationary. This evidence suggests that the data is stationary. The KPSS test also shows a p value of 0.01 which means we cannot reject the hypothesis that the data is stationary, and these two tests therefore provide strong evidence that our data is stationary and does not need to be differenced.
+
+Thus, our analysis suggest that our ARIMAX model should include the following parameters ARIMA(1, 0, 0) + break1, which can be written mathematically as follows:
+
+Δyt​=ϕ1​Δyt−1​+β1​D1t​+β2​D2t​+ϵ
+
+Now we shall set up the model based on this.
+
+# Training our model based on identified ARIMA 
+
+First, we create the training and test split
+
+```{r}
+
+# Ensure date column is a proper index
+gold_ts <- gold_weekly %>%
+  as_tsibble(index = week)
+
+```
+
+```{r}
+split_point <- gold_ts %>% 
+  slice(floor(0.8 * nrow(.))) %>% 
+  pull(week)
+
+train_ts <- gold_ts %>% filter(week <= split_point)
+test_ts  <- gold_ts %>% filter(week > split_point)
+
+```
+
+We set up our model using the train split
+
+```{r}
+
+model_fit_AR3 <- train_ts %>%
+  model(
+    arima_dummies = ARIMA(gold_open ~ break1 + break2 + pdq(1,0,1))
+  )
+
+```
+
+Lets check the residuals of the training model:
+
+```{r}
+model_fit_AR3 %>%
+  gg_tsresiduals()
+
+# Ljung-Box test for autocorrelation
+model_fit %>%
+  augment() %>%
+  features(.resid, ljung_box, lag = 12, dof = 5)  # 1 AR + 3 dummies
+
+```
+
+```{r}
+fc <- model_fit_AR3 %>%
+  forecast(new_data = test_ts)
+
+# Plot forecast vs actual
+fc %>%
+  autoplot(gold_ts) +
+  labs(title = "Forecast vs Actual (ARIMA(3,0,0) + dummies)", y = "Gold Opening Price")
+```
+
+from the ACF plot of the residuals we see that there is significant autocorrelation in lag 1, 2 and 4, and the Ljung-Box test shows a p-value of 0.0005 and we must therefore reject the null hypothesis that states the residuals are not autocorrelated. Therefore, our model is not capturing all the relevant information in the data since our residuals are not behaving like white noise. We shall therefore try to incorporate another AR term in the model to see if this improves it:
+
+```{r}
+model_fit_111 <- train_ts %>%
+  model(
+    arima_dummies = ARIMA(gold_open ~ break1 + break2 + pdq(1,1,1))
+  )
+```
+
+```{r}
+model_fit_111 %>%
+  gg_tsresiduals()
+
+# Ljung-Box test for autocorrelation
+model_fit_111 %>%
+  augment() %>%
+  features(.resid, ljung_box, lag = 12, dof = 5)  # 1 AR + 2 dummies
+
+```
+
+Now that we have trained the model we can use it to forecast on the test data:
+
+```{r}
+
+fc <- model_fit_111 %>%
+  forecast(new_data = test_ts)
+
+# Plot forecast vs actual
+fc %>%
+  autoplot(gold_ts) +
+  labs(title = "Forecast vs Actual (ARIMA(1,1,1) + dummies)", y = "Gold Opening Price")
+
+
+```
+
+Using autoselect to choose the model
+
+```{r}
+
+model_auto_xreg <- train_ts %>%
+  model(ARIMA(gold_open ~ break1))
+
+report(model_auto_xreg)       # For full ARIMA structure and coefficients
+glance(model_auto_xreg)       # For AICc, BIC, etc.
+
+```
+
+```{r}
+model_auto_xreg %>%
+  gg_tsresiduals()
+
+model_auto_xreg %>%
+  augment() %>%
+  features(.resid, ljung_box, lag = 12, dof = 3)
+
+```
+
+```{r}
+fc_auto <- model_auto_xreg %>%
+  forecast(new_data = test_ts)
+
+# Plot forecast vs actual
+fc_auto %>%
+  autoplot(gold_ts) +
+  labs(title = "Forecast vs Actual (AUTO ARIMA)", y = "Gold Opening Price")
+```
+
+# Attempting using an ETS model to better capture trend
+
+```{r}
+ets_fit <- train_ts %>%
+  model(ETS(gold_open))
+
+```
+
+```{r}
+h <- nrow(test_ts)
+
+ets_forecast <- ets_fit %>%
+  forecast(h = h)
+
+```
+
+```{r}
+ets_forecast %>%
+  autoplot(train_ts, level = NULL) +
+  autolayer(test_ts, gold_open, color = "red") +
+  labs(title = "ETS Forecast vs Actual (Gold Open Price)",
+       y = "Gold Open",
+       x = "Week")
+
+```
+
+# Simpler model using differenced data and box cox transformation
+
+```{r}
+gold_ts_diff <- gold_weekly %>%
+  mutate(week = yearweek(week)) %>%
+  as_tsibble(index = week)
+```
+
+```{r}
+gold_diff <- gold_ts_diff %>%
+  mutate(diff_gold_open = difference(gold_open)) %>%
+  filter(!is.na(diff_gold_open))
+
+```
+
+```{r}
+gold_diff %>%
+  autoplot(diff_gold_open) +
+  labs(title = "Differenced Weekly Gold Price", x = "Week", y = "Δ Gold Open")
+
+```
+
+```{r}
+n_total <- nrow(gold_diff)
+n_train <- floor(0.9 * n_total)
+
+train_diff <- gold_diff %>% slice(1:n_train)
+test_diff  <- gold_diff %>% slice((n_train + 1):n_total)
+
+```
+
+```{r}
+
+simple_model_fit <- train_diff %>%
+  model(
+    arima_dummies = ARIMA(diff_gold_open ~ pdq(3,0,0))
+  )
+
+```
+
+```{r}
+simple_model_fit %>% gg_tsresiduals()
+
+simple_model_fit %>%
+  augment() %>%
+  features(.resid, ljung_box, lag = 12)
+
+```
+
+```{r}
+
+fc_diff <- simple_model_fit %>%
+  forecast(h = nrow(test_diff), level = c(80, 95))  # Generate 80% and 95% confidence intervals
+
+
+```
+
+```{r}
+# Get the last known gold_open from training set (original series!)
+last_value <- gold_ts %>%
+  filter(week == max(train_diff$week)) %>%
+  pull(gold_open)
+
+# Back-transform differenced forecast to gold_open
+fc_levels <- fc_diff %>%
+  as_tibble() %>%
+  mutate(gold_open = cumsum(.mean) + last_value)
+
+
+```
+
+```{r}
+actual_test_prices <- gold_ts %>%
+  filter(week %in% test_diff$week) %>%
+  dplyr::select(week, gold_open)
+
+```
+
+```{r}
+actual_full_data <- bind_rows(train_ts, actual_test_prices)
+```
+
+```{r}
+# Merge forecasted values with the actual test data
+fc_plot_data <- left_join(fc_levels, actual_test_prices, by = "week")
+
+# Create the plot without confidence bounds
+ggplot() +
+  # Plot actual values for both training and test periods
+  geom_line(data = actual_full_data, aes(x = week, y = gold_open), color = "black") +  # Actual values (training + test)
+  
+  # Plot forecasted values for the test period (red dashed line)
+  geom_line(data = fc_plot_data, aes(x = week, y = gold_open.x), color = "red", linetype = "dashed") +  # Forecasted values
+  
+  labs(title = "Forecasted vs Actual Gold Prices",
+       x = "Week", y = "Gold Price") +
+  theme_minimal()
+
+
+
+```
+
+# Testing using cross-validation
+
+```{r}
+folds <- gold_ts %>%
+  stretch_tsibble(.init = 100, .step = 10) %>%
+  mutate(resample_id = row_number())
+
+
+```
+
+```{r}
+cv_models <- suppressWarnings(
+  folds %>%
+  model(
+    arima = ARIMA(gold_open),
+    ets = ETS(gold_open),
+    naive = NAIVE(gold_open)
+  )
+)
+
+```
+
+```{r}
+glance(cv_models)
+
+```
+
+```{r}
+
+cv_forecasts <- cv_models %>%
+  forecast(h = 1)
+
+```
+
+```{r}
+cv_accuracy <- cv_forecasts %>%
+  accuracy(gold_ts)
+
+```
+
+```{r}
+cv_accuracy[, c('.model','ME', 'RMSE', 'MAE', 'MAPE')]
+```
+
+We see that the ARIMA achieves the best MAE, but a slightly worse RMSE than ETS and Naive.
+
+# Final results
+
+```{r}
+model_fit <- train_ts %>%
+  model(
+    arima_dummies = ARIMA(gold_open ~ break1 + break2 + pdq(1,1,1)),
+    arima_auto = ARIMA(gold_open),
+    ets = ETS(gold_open),
+    naive = NAIVE(gold_open)
+  )
+
+```
+
+```{r}
+fc_all <- model_fit %>%
+  forecast(new_data = test_ts)
+
+```
+
+```{r}
+
+accuracy(fc_all, test_ts) %>%
+  dplyr::select(.model, MAE, RMSE, MAPE) %>%
+  mutate(across(c(MAE, RMSE, MAPE), round, 3)) %>%
+  arrange(RMSE)
+
+
+```
+
+```{r}
+
+accuracy_table <- accuracy(fc_all, test_ts) %>%
+  dplyr::select(.model, MAE, RMSE, MAPE)
+
+accuracy_long <- accuracy_table %>%
+  pivot_longer(cols = c(MAE, RMSE, MAPE), names_to = "Metric", values_to = "Value")
+
+```
+
+```{r}
+accuracy_table %>%
+  arrange(RMSE) %>%
+  mutate(.model = factor(.model, levels = .model)) %>%
+  pivot_longer(cols = c(MAE, RMSE, MAPE), names_to = "Metric", values_to = "Value") %>%
+  ggplot(aes(x = .model, y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  labs(title = "Forecast Accuracy Comparison", x = "Model", y = "Value") +
+  theme_minimal()
+
+```
